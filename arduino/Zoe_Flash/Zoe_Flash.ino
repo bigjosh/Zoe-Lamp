@@ -16,11 +16,22 @@
 
 #define FRAMES_PER_ROTATION (24)        // Depends on the actual lamp shade
 
+
+unsigned timerHigh =0;
+
+ISR(TIMER1_OVF_vect) {
+
+  timerHigh++;
+  
+}
+
 void initTicks(void) {
 
   TCCR1A = 0;   // No outputs, normal mode
   
   TCCR1B = _BV( CS12) ;        // Set prescaller to /256
+
+  TIMSK1 |= (1 << TOIE1);   // enable timer overflow interrupt  
   
 }
 
@@ -34,34 +45,32 @@ void initTicks(void) {
 
 
 static inline void resetTicks(void) {
-    TCNT1 = 0; 
-    TIFR1 |= _BV( TOV1);      // Clear overflow flag
+    cli();
+    TCNT1 = 0;        
+    timerHigh=0;        // No race here becuase TCNT1 will only be at like 2 by here
+    sei();
 }
 
-#define TICKS_FOREVER (UINT16_MAX)      // A Tick time in the infinite future. 
 
-static inline ticksOverflow(void) {
-  return( TIFR1 & _BV( TOV1) );
+static inline unsigned long ticksNow(void) {
+
+
+  cli();
+  // Stop timer...
+  TCCR1B = 0 ;                 // Set prescaller to OFF
+
+  unsigned h=timerHigher;     // Snap values
+  unsigned l=TCNT1;
+
+  TCNT1+=10;                  // Account for the cycles we missed whist looking
+
+  // Restart timer...
+  TCCR1B = _BV( CS12) ;        // Set prescaller to /256
+  sei();
+
+  return ((unsigned long) h << 16) | l;
+ 
 }
-
-static inline unsigned int ticksNow(void) {
-
-  uint16_t now = TCNT1;     /// Capture time quickly...
-  
-  if ( TIFR1 & _BV( TOV1) ) {      // Overflow flag set
-      return( TICKS_FOREVER );
-  }
-  
-  return( now );
-}
-
-// Has the time `when` past yet?
-static inline uint8_t ticksYet( unsigned int when ) {
-
-  return( ticksNow() > when );
-  
-}
-
 
 void setup() {
 
@@ -86,7 +95,7 @@ void setup() {
 
 #define FRAME_COUNT 24    // Number of flashes per rotation
 
-#define A (-2.7E-11)    // Acceleration in rotations/tick^2
+#define A (-3.7E-11)    // Acceleration in rotations/tick^2 - emperically derived
 
 void loop() {
 
@@ -94,67 +103,42 @@ void loop() {
 
   // We will start flashing when the rotation speed gets fast enough as measured by the tick time not overflowing in one revolution
 
-  uint8_t lastState =  digitalRead( HALL_SENSE_PIN);
+  uint8_t clickState =  digitalRead( HALL_SENSE_PIN);
 
-  while (lastState ==  digitalRead( HALL_SENSE_PIN));     // Wait for first transision
+  uint8_t lastState = clickState;    // We are currently in the click state. We will wait until the next transition into clickState to start working...
+
+  // Todo: probably ok to just skip on rotation. 
+
+  uint8_t clickCountdown = 2;         // Wait for at least 2 full rotations for speed to settle after hand acceleracion. 
 
   // Ok, we just started timing the first proper roation period. We don't know anything until this ends.
 
   resetTicks();
   
-  lastState = !lastState;            // Changed!
+  unsigned long startOfRoation=0;      // Just so we can offset the nextFlash - probably a better way to do this. 
   
-  uint8_t clickState = lastState;    // This is the state transision that we will trigger on (we never know which of the 2 transision we might actually see first on a given spin)
+  unsigned long nextFlash = UINT32_MAX;     // Flash never. 
 
-  unsigned nextFlash = TICKS_FOREVER;            // First flash should happen now!  
-  uint8_t frame = 0;
-  
-  unsigned lastRotationTicks=0;    // How many ticks did the last rotation take? 
+  unsigned frame = 0;
+ 
+  unsigned lastRotationTime=0;    // How many ticks did the last rotation take? 
 
-  unsigned startOfRoation=0;      // Just so we can offset the nextFlash - probably a better way to do this. 
-
-  //float trimmedA = A;              // Acceleration but with a running average trimed to the actual data to try to stay cenetred. 
-  
-  // Note that both lastflash and last clicked are normalized back down to the lowest value afer each click
-  
+  float trimmedA = A;              // Acceleration but with a running average trimed to the actual data to try to stay cenetred. 
+    
   Serial.begin(9600);
 
   while (1) {
 
-    unsigned timeNow = ticksNow();
-
-    if (timeNow == TICKS_FOREVER) {       // Took too long, start over from beging
-      return;
-    }
+    unsigned long timeNow = ticksNow();
 
     if (  lastState != digitalRead( HALL_SENSE_PIN) ) {     // Change of state?
 
       lastState = !lastState;
 
-      if (lastState == clickState) {        // Got next click....
+      if (lastState == clickState) {          // Got next click....
 
+        lastRotationTime = timeNow - startOfRotation;          // Remember how long that last rotation took 
 
-        // Ok, we normalize the counter down on each rotation so that it does not overflow.
-
-        TCNT1 -= timeNow;  // TODO: This might not be atomic. 
-
-        // This means that we have to adjust the nextFlash time down by the same ammount
-        
-        if ( nextFlash == TICKS_FOREVER ) {     // IF we are just starting, then do first flash!
-
-          nextFlash = timeNow;
-
-        } else {                                // Otherwise normalize the pending flash
-
-          nextFlash -= timeNow;
-
-        }
-    
-        lastRotationTicks = timeNow;          // Remeber how long that last rotation took 
-
-        timeNow =0;                   
-        frame=0;                              // We are at the very begining of this rotation
-          
       }
               
     }
