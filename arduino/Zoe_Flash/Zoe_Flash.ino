@@ -88,6 +88,10 @@ void setup() {
 
 #define A (-2.7E-11)    // Acceleration in rotations/tick^2
 
+
+// a = -0.00000000003223003387
+
+
 void loop() {
 
   // Loop is one spin cycle. 
@@ -112,6 +116,9 @@ void loop() {
   unsigned lastRotationTicks=0;    // How many ticks did the last rotation take? 
 
   unsigned startOfRoation=0;      // Just so we can offset the nextFlash - probably a better way to do this. 
+
+  float Vend = 0 ;
+  float a=0;
 
   //float trimmedA = A;              // Acceleration but with a running average trimed to the actual data to try to stay cenetred. 
   
@@ -154,6 +161,22 @@ void loop() {
 
         timeNow =0;                   
         frame=0;                              // We are at the very begining of this rotation
+
+        static float Vavg_prev=0;
+
+        float Vavg = 1.0 / lastRotationTicks;                   // The average speed over the last rotation. Becuase of constant rotation this happened exactly in the middle. (in Rotations/Tick)
+
+        a = ( Vavg - Vavg_prev ) / lastRotationTicks;
+
+        //if (Vavg_prev!=0) {
+        //  Serial.println(a,20);
+        //}
+
+        Vavg_prev = Vavg;
+        
+        
+        Vend = Vavg + ( 0.5 * a * lastRotationTicks );  // The instantious speed at the ned of the last rotation, by adding the acceleration durring the second half or the rotation. (in Rotations/Tick)
+
           
       }
               
@@ -165,8 +188,8 @@ void loop() {
       digitalWrite( LEDA_OUT_PIN , HIGH );
       digitalWrite( LEDB_OUT_PIN , HIGH );
 
-      for(unsigned i=20;i>0; i--) {     // Strech the flash longer for slower speeds so we can consistant brightness. 
-        _delay_us(10);     // One tick
+      for(unsigned i=(lastRotationTicks/256);i>0; i--) {     // Strech the flash longer for slower speeds so we can consistant brightness. 
+        _delay_us(5);     // One tick
       }
       digitalWrite( LEDA_OUT_PIN , LOW );
       digitalWrite( LEDB_OUT_PIN , LOW );
@@ -175,20 +198,18 @@ void loop() {
 
       frame++;
 
-      if (frame>=FRAME_COUNT+3) {
+      if (frame>=FRAME_COUNT+5) {
         
         nextFlash = TICKS_FOREVER;      // Stop flashing until we get another rotation
         
       } else {
 
-        float Vavg = 1.0 / lastRotationTicks;                   // The average speed over the last rotation. Becuase of constant rotation this happened exactly in the middle. (in Rotations/Tick)
-        float Vend = Vavg + ( 0.5 * A * lastRotationTicks );  // The instantious speed at the ned of the last rotation, by adding the acceleration durring the second half or the rotation. (in Rotations/Tick)
 
         float x = (1.0 * frame)/FRAME_COUNT;                  // Where will the next flash happen? (in Rotations)
 
         // Now we have to use the quadratic equaltion to solve for time (in Ticks) when position will be x (in Rotations)
 
-        nextFlash =  ( (-1.0 * Vend) + sqrt( ( Vend * Vend ) + ( 2.0 * A * x ))) / A;
+        nextFlash =  ( (-1.0 * Vend) + sqrt( ( Vend * Vend ) + ( 2.0 * a * x ))) / a;
 
 
         /*
