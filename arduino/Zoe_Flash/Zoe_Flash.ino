@@ -1,4 +1,4 @@
-
+#include <avr/wdt.h>
 #include <limits.h>
 
 #define LEDA_OUT_PIN     2
@@ -16,12 +16,13 @@
 
 #define FRAMES_PER_ROTATION (24)        // Depends on the actual lamp shade
 
-
+/*
 unsigned timerHigh =0;
 
 ISR(TIMER1_OVF_vect) {
 
   timerHigh++;
+  TIFR1 |= _BV( TOV1);      // Clear overflow flag
   
 }
 
@@ -29,7 +30,7 @@ void initTicks(void) {
 
   TCCR1A = 0;   // No outputs, normal mode
   
-  TCCR1B = _BV( CS12) ;        // Set prescaller to /256
+  TCCR1B = _BV( CS12) ;        // Set prescaller to /256 = 16Mhz/256 = 62Khz  /65536 (one full timer cycle) = ~1Hz
 
   TIMSK1 |= (1 << TOIE1);   // enable timer overflow interrupt  
   
@@ -48,19 +49,24 @@ static inline void resetTicks(void) {
     cli();
     TCNT1 = 0;        
     timerHigh=0;        // No race here becuase TCNT1 will only be at like 2 by here
+    TIFR1 |= _BV( TOV1);      // Clear overflow flag    
     sei();
 }
 
 
 static inline unsigned long ticksNow(void) {
 
-
   cli();
   // Stop timer...
   TCCR1B = 0 ;                 // Set prescaller to OFF
 
-  unsigned h=timerHigher;     // Snap values
+
+  unsigned h=timerHigh;     // Snap values
   unsigned l=TCNT1;
+
+  if (  TIFR1 |= _BV( TOV1) ) {      // check overflow flag - would be set if we overflowed between cli() and turning the timer off. Unlikely, but possible!
+      h+=1;
+  }
 
   TCNT1+=10;                  // Account for the cycles we missed whist looking
 
@@ -71,6 +77,8 @@ static inline unsigned long ticksNow(void) {
   return ((unsigned long) h << 16) | l;
  
 }
+
+*/
 
 void setup() {
 
@@ -90,12 +98,29 @@ void setup() {
   pinMode( HALL_VCC_PIN , OUTPUT );
   digitalWrite( HALL_VCC_PIN , HIGH );    // Power up the hall latch
 
-  initTicks();
+  //initTicks();
 }
 
-#define FRAME_COUNT 24    // Number of flashes per rotation
 
-#define A (-3.7E-11)    // Acceleration in rotations/tick^2 - emperically derived
+void reset(void) {      // TODO: Could just set this to timeout value before looping and then WDT inside the loop to have reset happen naturally. 
+
+  wdt_enable( WDTO_60MS );
+  while (1);
+  
+}
+
+
+#define A_BUFFER_LEN 100
+float a_buffer[A_BUFFER_LEN];
+unsigned a_buffer_count=0;
+
+#define MICROS_PER_S      (1000000UL)
+
+#define FRAMES_PER_R 24    // Number of flashes per rotation
+
+#define INITIAL_A (-3.7E-11)    // Acceleration in rotations/tick^2 - emperically derived
+
+#define MAX_MICROS_PER_R (1UL*MICROS_PER_S)      // If we take more than ! second between clicks, that is 24 flashes/sec, which is pretty harsh
 
 void loop() {
 
@@ -105,45 +130,122 @@ void loop() {
 
   uint8_t clickState =  digitalRead( HALL_SENSE_PIN);
 
-  uint8_t lastState = clickState;    // We are currently in the click state. We will wait until the next transition into clickState to start working...
-
-  // Todo: probably ok to just skip on rotation. 
-
-  uint8_t clickCountdown = 2;         // Wait for at least 2 full rotations for speed to settle after hand acceleracion. 
-
-  // Ok, we just started timing the first proper roation period. We don't know anything until this ends.
-
-  resetTicks();
+  uint8_t currentState = clickState;    // We are currently in the click state. We will wait until the next transition into clickState to start working...
+                                   // This prevents a spurrious flash on the first transision.
+    
+  unsigned long startOfCurrentRotation=0;      // We just woke up so we dont know when it started!
   
-  unsigned long startOfRoation=0;      // Just so we can offset the nextFlash - probably a better way to do this. 
+  float Vstart_R_PER_U  =0;                      // The instant speed at the start of the current rotation 
+
+
+  float Vavg_R_PER_U =0;        // Average speed durring previous rotation
   
   unsigned long nextFlash = UINT32_MAX;     // Flash never. 
 
-  unsigned frame = 0;
- 
-  unsigned lastRotationTime=0;    // How many ticks did the last rotation take? 
 
-  float trimmedA = A;              // Acceleration but with a running average trimed to the actual data to try to stay cenetred. 
+  float x=0;    // The location (in rotations since last click) where next flash will happen
+  unsigned long startOfTime =0;
+ 
+  unsigned long lengthOfLastRotation_U= UINT32_MAX;    // How many ticks did the last rotation take? 
+
+  float a = 0;              // Acceleration but with a running average trimed to the actual data to try to stay cenetred. 
     
   Serial.begin(9600);
+ 
+  unsigned long giveupTime = micros() + MAX_MICROS_PER_R;
+
+  Serial.write('S');
 
   while (1) {
 
-    unsigned long timeNow = ticksNow();
+    unsigned long timeNow = micros();
 
-    if (  lastState != digitalRead( HALL_SENSE_PIN) ) {     // Change of state?
+    if (  currentState != digitalRead( HALL_SENSE_PIN) ) {     // Change of state?
 
-      lastState = !lastState;
+      currentState = !currentState;           // Update currentState to match what it really is (avoid doign another slow digitalRead()
 
-      if (lastState == clickState) {          // Got next click....
+      if (currentState == clickState) {          // Got next click....
 
-        lastRotationTime = timeNow - startOfRotation;          // Remember how long that last rotation took 
+         Serial.write('C');
 
+        //Serial.print( "Click time " );
+        //Serial.println( timeNow );
+
+        if (startOfCurrentRotation>0) {      // if this is the First rotation then we can't compute last rotation time yet
+                   
+          lengthOfLastRotation_U = timeNow - startOfCurrentRotation;          // Remember how long that last rotation took 
+  
+/*
+          Serial.print( "timeNow" );
+          Serial.println( timeNow );
+          
+          Serial.print( "startOfCurrentRotation" );
+          Serial.println( startOfCurrentRotation );
+          
+          Serial.print( "lastRotationTime" );
+          Serial.println( lengthOfLastRotation_U );              
+*/
+          // Acceleration is difference in v over time
+
+          //a = (prevous_v - current_v) / timedifference
+
+          float Vavg_New_R_PER_U = 1.0 / lengthOfLastRotation_U;               // The average speed over the last rotation. Becuase of constant rotation this happened exactly in the middle. (in Rotations/Tick)
+          
+          if (a==0) {     // a never assigned, so First flash should happen now that we have all data!
+
+            nextFlash = timeNow;                // If so, then trigger the first flash 
+            x=0;
+            startOfTime= timeNow;
+
+            Serial.write('F');
+            
+          }       
+
+
+          // Acceleration = differnece in speed between last two averages / time it took 
+          
+          a = (Vavg_New_R_PER_U - Vavg_R_PER_U) / lengthOfLastRotation_U;
+
+          if (a_buffer_count<A_BUFFER_LEN) {
+            a_buffer[a_buffer_count++] = a;
+          }
+          
+
+          // Don't bother to try to get a interpolated here becuase it is not linear
+
+          Vstart_R_PER_U = Vavg_R_PER_U + ( 0.5 * a * (lengthOfLastRotation_U ) );      // The instantious speed at the end of the last rotation, by adding the acceleration durring the second half or the rotation. (in Rotations/Tick)            
+
+          Vavg_R_PER_U = Vavg_New_R_PER_U;      // Save this avgerage speed for next time
+
+          /*
+          Serial.print("lengthOfLastRotation_U:");
+          Serial.println(lengthOfLastRotation_U);
+    
+    
+          Serial.print(" Vstart 100R/S:");      // Convert up becuase arduino only prints floats to 2 decimals!!!!
+          Serial.println(Vstart_R_PER_U * MICROS_PER_S * 100);
+
+          */
+          
+         //Serial.print("a=");      // Convert up becuase arduino only prints floats to 2 decimals!!!!
+         //Serial.println(a , 20 );
+
+  
+        }
+        
+        startOfCurrentRotation = timeNow;
+        
+        //frame=0;
+
+        giveupTime = timeNow + MAX_MICROS_PER_R;        // We clicked, so we are still spinning and if we didn't give up yet then we should reset when. we will 
+
+        //Serial.println( lengthOfLastRotation_U);        
+        
       }
               
     }
 
-    if (timeNow > nextFlash) {     // Time for next flash? Not do not use >+ or else we will catch the TICKS_FOREVER case
+    if ( timeNow >= nextFlash) {     // Time for next flash? Not do not use >+ or else we will catch the TICKS_FOREVER case
        
       // Flash!!!!
       digitalWrite( LEDA_OUT_PIN , HIGH );
@@ -157,45 +259,51 @@ void loop() {
 
       // Now that the flash is done, we have time to calculate when to flash again based on the last rotation period and the current frame
 
-      frame++;
 
-      if (frame>=FRAME_COUNT+3) {
+/*
+      float Vavg_R_PER_U = 1.0 / lengthOfLastRotation_U;               // The average speed over the last rotation. Becuase of constant rotation this happened exactly in the middle. (in Rotations/Tick)
+
+      Serial.print("lengthOfLastRotation_U:");
+      Serial.println(lengthOfLastRotation_U);
+
+
+      Serial.print(" Vavg 100R/S:");      // Convert up becuase arduino only prints floats to 2 decimals!!!!
+      Serial.println(Vavg_R_PER_U * MICROS_PER_S * 100);
+*/
+
+      x += (1.0/FRAMES_PER_R);        // New time we should flash on next frame....
+
+      // Now we have to use the quadratic equaltion to solve for time (in Ticks) when position will be x (in Rotations)
+
+      nextFlash =  startOfTime + ( (-1.0 * Vstart_R_PER_U) + sqrt( ( Vstart_R_PER_U * Vstart_R_PER_U ) + ( 2.0 * a * x ))) / a;
+             
+      //Serial.print(" df:");
+      //Serial.println( nextFlash - timeNow );
+      
+  //    Serial.print(" frame:");
+  //    Serial.println(frame);
+
+      // TODO: Compute how long the flash durration should be to light for, say, 100th of the frame. 
+
+      if (micros()>=nextFlash) {
+        //Serial.println("EXPIRE!!!!!!!!!");
         
-        nextFlash = TICKS_FOREVER;      // Stop flashing until we get another rotation
-        
-      } else {
-
-        float Vavg = 1.0 / lastRotationTicks;                   // The average speed over the last rotation. Becuase of constant rotation this happened exactly in the middle. (in Rotations/Tick)
-        float Vend = Vavg + ( 0.5 * A * lastRotationTicks );  // The instantious speed at the ned of the last rotation, by adding the acceleration durring the second half or the rotation. (in Rotations/Tick)
-
-        float x = (1.0 * frame)/FRAME_COUNT;                  // Where will the next flash happen? (in Rotations)
-
-        // Now we have to use the quadratic equaltion to solve for time (in Ticks) when position will be x (in Rotations)
-
-        nextFlash =  ( (-1.0 * Vend) + sqrt( ( Vend * Vend ) + ( 2.0 * A * x ))) / A;
-
-
-        /*
-        Serial.print("NextFlash:");
-        Serial.print(nextFlash);
-
-        Serial.print(" LastRoationTicks:");
-        Serial.print( lastRotationTicks);
-        Serial.print(" Vend:");
-        Serial.print(Vend);
-
-
-        
-        Serial.print(" frame:");
-        Serial.println(frame);
-
-        */
-        // TODO: Compute how long the flash durration should be to light for, say, 100th of the frame. 
-
       }
-          
-    } 
+  
+    }
+
     
+    if (timeNow>giveupTime) {
+
+      Serial.println("a buffer");
+
+      for(int i=0; i<a_buffer_count;i++ ){
+          Serial.println(a_buffer[i],20);        
+      }
+//        Serial.println("GIVE UP!!!!!!!!!");
+       
+      return;                   // This will enter the loop() again and We will wait to for a full rotation to start again.
+    }
     
     //Serial.print("T:");
     //Serial.println(timeNow);
