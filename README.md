@@ -6,11 +6,11 @@ Currently running on an unmodified Arduino.
 ##PINS
 
 Pin|Direction|Connection
--|-|-
-2,3|Out|Each connected to one of the LED transistors. Driving HIGH will light the associated 3 LED modules,
-8|Out|Ground for the US1881. Set LOW.
-9|In|Connected to the OUT of the US1881 hall effect latch. Switches between high and low on each half turn.
-10|Out|Vcc for the US1881. Set HIGH.
+- | - | -
+2 | Out | Connected to gate of IRLZ34N transistor (thanks [Robb!](http://robb.cc)) that turns LEDs on. Driving HIGH will light the associated LED strips,
+10 | Out |Vcc for the A3141 hall effect sensor. Set HIGH.
+9 | Out | Ground for A3141. Set LOW. 
+8 | In | Connected to the OUT of the A3141 hall effect sensor. Switches high when magnet passes over. 
 
 
  

@@ -1,242 +1,209 @@
 
-#include <limits.h>
+#define FETPIN 2
+#define LEDPIN 13
+#define HALLOPIN 8
+#define HALLGPIN 9
+#define HALLVPIN 10
 
-#define LEDA_OUT_PIN     2
-#define LEDB_OUT_PIN     3
 
+// Don't flash less than this freeqncy to avoid seisures
+#define MIN_FLASH_FREQ_HZ  20
 
-#define HALL_SENSE_PIN   8      // Also ICP1 pin in case we want to use the Input Capture Unit for more precision
-#define HALL_GND_PIN     9
-#define HALL_VCC_PIN    10
+#define US_PER_S  1000000
 
-// We will use the 16 bit Timer1 as a stopwatch
+// maximum time between flashes to avoid strobe
+#define MAX_FLASH_SPACING_US (US_PER_S/MIN_FLASH_FREQ_HZ)
 
-// Set prescaller to /64. With a 16Mhz clock, this gives us a tick clock of 250KHz, and a tick time of 4uS
-// This is a 16 bit timer, so we will overflow at 65536*4us = ~250ms. This is a bout 4Hz, way longer than We need since we will stop blinking at like 10Hz
+#define FPS_STEPS 3
 
-#define FRAMES_PER_ROTATION (24)        // Depends on the actual lamp shade
+byte fps_steps[FPS_STEPS] = { 24 , 16 , 12 };
 
-void initTicks(void) {
+byte current_fps_step = 0; 
 
-  TCCR1A = 0;   // No outputs, normal mode
-  
-  TCCR1B = _BV( CS12) ;        // Set prescaller to /256
-  
+#define FLASH_PER_REV   12      // Total flashes per revolution
+
+#define TRIGGER_PER_REV 4       // Number of magents mounted
+
+unsigned flash_per_trigger;
+
+void next_flash_per_trigger() {
+
+  current_fps_step++;
+
+  if (current_fps_step>=FPS_STEPS) current_fps_step=0; 
+
+  flash_per_trigger = fps_steps[current_fps_step] / TRIGGER_PER_REV;  
+
+  Serial.println("step:");
+  Serial.println(current_fps_step);  
+  Serial.println(fps_steps[current_fps_step]);  
+  Serial.println(flash_per_trigger);  
+
 }
 
-
-#define TICK_PER_SECOND (F_CPU/256)   // Tick freqency after prescaller
-
-// On Arduino clock is 16Mhz so...
-// TICKS_PER_SECOND = 16000000 / 256 = 62500
-// One tick = 16us
-// Maximum time before 16 bit timer overflows is 16us * 65536 = ~1 second which is more than long enough for our purposes. 
-
-
-static inline void resetTicks(void) {
-    TCNT1 = 0; 
-    TIFR1 |= _BV( TOV1);      // Clear overflow flag
-}
-
-#define TICKS_FOREVER (UINT16_MAX)      // A Tick time in the infinite future. 
-
-static inline ticksOverflow(void) {
-  return( TIFR1 & _BV( TOV1) );
-}
-
-static inline unsigned int ticksNow(void) {
-
-  uint16_t now = TCNT1;     /// Capture time quickly...
-  
-  if ( TIFR1 & _BV( TOV1) ) {      // Overflow flag set
-      return( TICKS_FOREVER );
-  }
-  
-  return( now );
-}
-
-// Has the time `when` past yet?
-static inline uint8_t ticksYet( unsigned int when ) {
-
-  return( ticksNow() > when );
-  
-}
 
 
 void setup() {
 
-  // LED drivers. High to turn on LED modules.
-  pinMode( LEDA_OUT_PIN , OUTPUT );
- //DDRD |= _BV(2);
+  Serial.begin(9600);
 
-  pinMode( LEDB_OUT_PIN , OUTPUT );
-  //DDRD |= _BV(3);
-
-  // US1881 hall effect latch connected to pins 8,9,10. 
+  Serial.println("start");
   
-  pinMode( HALL_GND_PIN , OUTPUT );
+  // set the digital pin as output:
+  pinMode( FETPIN  , OUTPUT);
+  pinMode( HALLVPIN , OUTPUT);
+  pinMode( HALLGPIN  , OUTPUT);
+  pinMode( HALLOPIN , INPUT_PULLUP );
 
-  pinMode( HALL_SENSE_PIN , INPUT_PULLUP );
+  pinMode( LEDPIN  , OUTPUT);
+
+  digitalWrite( HALLVPIN , 1 );
+
   
-  pinMode( HALL_VCC_PIN , OUTPUT );
-  digitalWrite( HALL_VCC_PIN , HIGH );    // Power up the hall latch
-
-  initTicks();
+  
+    
 }
 
-#define FRAME_COUNT 24    // Number of flashes per rotation
+#define VSAMPLE_COUNT (TRIGGER_PER_REV*2)   // Filter average of last 2 rotations
 
-#define A (-2.7E-11)    // Acceleration in rotations/tick^2
+unsigned long vsamples[VSAMPLE_COUNT];
+
+byte nextvsampleslot=0;
+
+unsigned long vsampletotal=0;
+
+// Whenthis gets to 0 then we know we have not seen a rising count in the sample buffer
+byte fallingvsamplecountdown =VSAMPLE_COUNT; 
+
+void addvsample( unsigned long s ) {
+
+ // Serial.println("remove:");
+ // Serial.println(vsamples[ nextvsampleslot ]);
+  
+  //Serial.println("add");
+  //Serial.println(s);
+  
+  vsampletotal-= vsamples[ nextvsampleslot ];
+
+  vsampletotal += s;
+  
+  //Serial.println("total:");
+  //Serial.println(vsampletotal / VSAMPLE_COUNT);
+
+  vsamples[ nextvsampleslot ] = s;
+
+  nextvsampleslot++;
+
+  if (nextvsampleslot==VSAMPLE_COUNT) nextvsampleslot = 0;
+
+}
 
 
-// a = -0.00000000003223003387
 
+
+// Speed in deg/sec
+
+float v=0;
+
+unsigned long last_micros=0;
+
+unsigned long int nextflash= UINT32_MAX;
+
+unsigned long int lastflash= UINT32_MAX;
+
+unsigned long int lasttrigger= UINT32_MAX;
+
+unsigned long pace;   // how long between flashes? in us
+
+unsigned long lastdiff=0;
+
+unsigned d;   // deceleration per flash 
+
+unsigned long giveuptime = 0;   // When we stop flashing (catches if the spin suddently stopped) 
+
+byte flip=0;
+
+
+long push=0;
 
 void loop() {
 
-  // Loop is one spin cycle. 
+    unsigned long now = micros();   
 
-  // We will start flashing when the rotation speed gets fast enough as measured by the tick time not overflowing in one revolution
+    if ( digitalRead( HALLOPIN ) ) {
+      if (flip==0) {
+        flip=1;
 
-  uint8_t lastState =  digitalRead( HALL_SENSE_PIN);
+        unsigned long diff = now - last_micros; 
 
-  while (lastState ==  digitalRead( HALL_SENSE_PIN));     // Wait for first transision
+        addvsample( diff ); 
 
-  // Ok, we just started timing the first proper roation period. We don't know anything until this ends.
+        v = (lastdiff - diff);
 
-  resetTicks();
-  
-  lastState = !lastState;            // Changed!
-  
-  uint8_t clickState = lastState;    // This is the state transision that we will trigger on (we never know which of the 2 transision we might actually see first on a given spin)
-
-  unsigned nextFlash = TICKS_FOREVER;            // First flash should happen now!  
-  uint8_t frame = 0;
-  
-  unsigned lastRotationTicks=0;    // How many ticks did the last rotation take? 
-
-  unsigned startOfRoation=0;      // Just so we can offset the nextFlash - probably a better way to do this. 
-
-  float Vend = 0 ;
-  float a=0;
-
-  //float trimmedA = A;              // Acceleration but with a running average trimed to the actual data to try to stay cenetred. 
-  
-  // Note that both lastflash and last clicked are normalized back down to the lowest value afer each click
-  
-  Serial.begin(9600);
-
-  while (1) {
-
-    unsigned timeNow = ticksNow();
-
-    if (timeNow == TICKS_FOREVER) {       // Took too long, start over from beging
-      return;
-    }
-
-    if (  lastState != digitalRead( HALL_SENSE_PIN) ) {     // Change of state?
-
-      lastState = !lastState;
-
-      if (lastState == clickState) {        // Got next click....
+        // V is how much less this diff is from the last one, so represents the deceleration
 
 
-        // Ok, we normalize the counter down on each rotation so that it does not overflow.
+        lastdiff = diff;
 
-        TCNT1 -= timeNow;  // TODO: This might not be atomic. 
+        //v = (360.0/4) / ( diff  / 1000.0 ); 
 
-        // This means that we have to adjust the nextFlash time down by the same ammount
-        
-        if ( nextFlash == TICKS_FOREVER ) {     // IF we are just starting, then do first flash!
+ //       Serial.println(now);
+//        Serial.println(v);
 
-          nextFlash = timeNow;
+        last_micros = now; 
 
-        } else {                                // Otherwise normalize the pending flash
+        if ( now > giveuptime) {
 
-          nextFlash -= timeNow;
+          nextflash=now;
+          push=0;
 
-        }
-    
-        lastRotationTicks = timeNow;          // Remeber how long that last rotation took 
+          next_flash_per_trigger();
 
-        timeNow =0;                   
-        frame=0;                              // We are at the very begining of this rotation
+        } 
 
-        static float Vavg_prev=0;
-
-        float Vavg = 1.0 / lastRotationTicks;                   // The average speed over the last rotation. Becuase of constant rotation this happened exactly in the middle. (in Rotations/Tick)
-
-        a = ( Vavg - Vavg_prev ) / lastRotationTicks;
-
-        //if (Vavg_prev!=0) {
-        //  Serial.println(a,20);
-        //}
-
-        Vavg_prev = Vavg;
-        
-        
-        Vend = Vavg + ( 0.5 * a * lastRotationTicks );  // The instantious speed at the ned of the last rotation, by adding the acceleration durring the second half or the rotation. (in Rotations/Tick)
-
-          
-      }
-              
-    }
-
-    if (timeNow > nextFlash) {     // Time for next flash? Not do not use >+ or else we will catch the TICKS_FOREVER case
-       
-      // Flash!!!!
-      digitalWrite( LEDA_OUT_PIN , HIGH );
-      digitalWrite( LEDB_OUT_PIN , HIGH );
-
-      for(unsigned i=(lastRotationTicks/256);i>0; i--) {     // Strech the flash longer for slower speeds so we can consistant brightness. 
-        _delay_us(5);     // One tick
-      }
-      digitalWrite( LEDA_OUT_PIN , LOW );
-      digitalWrite( LEDB_OUT_PIN , LOW );
-
-      // Now that the flash is done, we have time to calculate when to flash again based on the last rotation period and the current frame
-
-      frame++;
-
-      if (frame>=FRAME_COUNT+5) {
-        
-        nextFlash = TICKS_FOREVER;      // Stop flashing until we get another rotation
-        
-      } else {
+        pace = ((vsampletotal / VSAMPLE_COUNT) / flash_per_trigger);
 
 
-        float x = (1.0 * frame)/FRAME_COUNT;                  // Where will the next flash happen? (in Rotations)
-
-        // Now we have to use the quadratic equaltion to solve for time (in Ticks) when position will be x (in Rotations)
-
-        nextFlash =  ( (-1.0 * Vend) + sqrt( ( Vend * Vend ) + ( 2.0 * a * x ))) / a;
-
+        giveuptime = now + ( 2 * MAX_FLASH_SPACING_US * flash_per_trigger ) ;   // If we miss miss a trigger then stop flashing. 
 
         /*
-        Serial.print("NextFlash:");
-        Serial.print(nextFlash);
-
-        Serial.print(" LastRoationTicks:");
-        Serial.print( lastRotationTicks);
-        Serial.print(" Vend:");
-        Serial.print(Vend);
-
-
-        
-        Serial.print(" frame:");
-        Serial.println(frame);
-
+        Serial.println("trigger:");
+        Serial.println(now);
+        Serial.println(giveuptime);
         */
-        // TODO: Compute how long the flash durration should be to light for, say, 100th of the frame. 
-
+               
+       
       }
-          
-    } 
+      digitalWrite( LEDPIN , 1 );
+    } else {
+      digitalWrite( LEDPIN , 0);
+      flip=0;
+    }
+
+    if ( (now>=nextflash) && (pace < MAX_FLASH_SPACING_US) ) {    // Don't flash slower than once per 50ms (20Hz) 
+
+       
+        digitalWrite(FETPIN , 1);
+        _delay_ms(1);
+        digitalWrite(FETPIN , 0);
+
+        lastflash = now; 
+
+        nextflash += pace  ;
+       
+        //Serial.println("flash:");
+        //Serial.println(nextflash);
+        
+            
+    }
+
+    if  (now >  giveuptime ) {
+
+
+       nextflash= UINT32_MAX;
+
+    }
     
     
-    //Serial.print("T:");
-    //Serial.println(timeNow);
-
-  } // while (1) 
-} // loop()
-
+    
+}
