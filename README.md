@@ -7,10 +7,17 @@ Currently running on an unmodified Arduino.
 
 | Pin | Direction | Connection |
 | - | - | - |
-| 2 | Out | Connected to gate of IRLZ34N transistor (thanks [Robb!](http://robb.cc)) that turns LEDs on. Driving HIGH will light the associated LED strips. |
-| 10 | Out |Vcc for the A3141 hall effect sensor. Set HIGH. |
-| 9 | Out | Ground for A3141. Set LOW.  |
-| 8 | In | Connected to the OUT of the A3141 hall effect sensor. Switches high when magnet passes over. |
+| 9 | Out | Connected to gate of IRLZ34N transistor (thanks [Robb!](http://robb.cc)) that turns LEDs on. Driving HIGH will light the associated LED strips. Must be PWM |
+| 4 | Out |Vcc for the A3141 hall effect sensor. Set HIGH. |
+| 3 | Out | Ground for A3141. Set LOW.  |
+| 2 | In | Connected to the OUT of the A3141 hall effect sensor. Switches high when magnet passes over. |
+
+
+## LED Strips
+
+So far these are the brightest by far, but expensive...
+
+https://www.amazon.com/gp/product/B00PUY6RUI/ref=ppx_yo_dt_b_search_asin_title?ie=UTF8&th=1
 
 
  ## TODO
