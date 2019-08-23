@@ -1,9 +1,11 @@
 
-#define FETPIN 2
+#define FETPIN 9     // Must be a PWM pin
 #define LEDPIN 13
-#define HALLOPIN 8
-#define HALLGPIN 9
-#define HALLVPIN 10
+#define HALLOPIN 2
+#define HALLGPIN 3
+#define HALLVPIN 4
+
+#define STEADY_ON_A_VALUE 25   // Empreically found to match the brightness level while spinning
 
 
 // Don't flash less than this freeqncy to avoid seisures
@@ -33,14 +35,25 @@ void next_flash_per_trigger() {
   if (current_fps_step>=FPS_STEPS) current_fps_step=0; 
 
   flash_per_trigger = fps_steps[current_fps_step] / TRIGGER_PER_REV;  
-
+/*
   Serial.println("step:");
   Serial.println(current_fps_step);  
   Serial.println(fps_steps[current_fps_step]);  
   Serial.println(flash_per_trigger);  
-
+*/
 }
 
+
+
+void steady_light_on() {
+
+  analogWrite( FETPIN , STEADY_ON_A_VALUE );
+  
+}
+
+void steady_light_off() {
+  
+}
 
 
 void setup() {
@@ -48,6 +61,8 @@ void setup() {
   Serial.begin(9600);
 
   Serial.println("start");
+
+  steady_light_on();
   
   // set the digital pin as output:
   pinMode( FETPIN  , OUTPUT);
@@ -126,7 +141,24 @@ byte flip=0;
 
 long push=0;
 
+bool flashing_flag  = false;    // Are we currently animating? If no, then show steady state
+
+
 void loop() {
+
+/*
+
+  digitalWrite( FETPIN , 1 );
+
+  delay(100);
+  
+  digitalWrite( FETPIN , 0 );
+
+  delay(100);
+
+  return;
+
+  */
 
     unsigned long now = micros();   
 
@@ -153,7 +185,7 @@ void loop() {
         last_micros = now; 
 
         if ( now > giveuptime) {
-
+        
           nextflash=now;
           push=0;
 
@@ -182,11 +214,17 @@ void loop() {
 
     if ( (now>=nextflash) && (pace < MAX_FLASH_SPACING_US) ) {    // Don't flash slower than once per 50ms (20Hz) 
 
+        if (flashing_flag) {
        
-        digitalWrite(FETPIN , 1);
-        _delay_ms(1);
-        digitalWrite(FETPIN , 0);
+          digitalWrite(FETPIN , 1);
+          _delay_ms(1);
+          digitalWrite(FETPIN , 0);
 
+        } else {
+          
+          flashing_flag = true; 
+          
+        }
         lastflash = now; 
 
         nextflash += pace  ;
@@ -198,6 +236,13 @@ void loop() {
     }
 
     if  (now >  giveuptime ) {
+
+      if (flashing_flag) {
+
+        steady_light_on();
+        flashing_flag = false; 
+
+      }
 
 
        nextflash= UINT32_MAX;
